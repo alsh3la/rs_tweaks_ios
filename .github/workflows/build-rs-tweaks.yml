@@ -1,0 +1,65 @@
+name: Build RS Tweaks IPA
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  build-ipa:
+    name: Build iOS IPA for RS Tweaks
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: "3.22.0"
+
+      - name: Install Dependencies
+        run: |
+          flutter clean
+          flutter pub get
+
+      - name: Ensure iOS Project
+        run: |
+          if [ ! -d "ios" ]; then
+            flutter create --platforms=ios .
+          fi
+
+      - name: Configure iOS Settings
+        run: |
+          # Configure Info.plist for WebView
+          plutil -replace CFBundleDisplayName -string "RS Tweaks" ios/Runner/Info.plist
+          plutil -replace NSAppTransportSecurity -xml '<dict><key>NSAllowsArbitraryLoads</key><true/></dict>' ios/Runner/Info.plist
+          plutil -replace UIFileSharingEnabled -bool YES ios/Runner/Info.plist
+          plutil -replace MinimumOSVersion -string "14.0" ios/Runner/Info.plist
+
+      - name: Build iOS App (No Signing)
+        run: |
+          flutter build ios --release --no-codesign
+
+      - name: Create IPA File
+        run: |
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -qr RS_Tweaks.ipa Payload
+          echo "IPA size: $(du -h RS_Tweaks.ipa | cut -f1)"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RS-Tweaks-IPA
+          path: RS_Tweaks.ipa
+
+      - name: Generate Summary
+        run: |
+          echo "## RS Tweaks IPA Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "✅ IPA file generated successfully" >> $GITHUB_STEP_SUMMARY
+          echo "📱 App: RS Tweaks" >> $GITHUB_STEP_SUMMARY
+          echo "🔗 Target: https://i.alsh3la991.workers.dev/" >> $GITHUB_STEP_SUMMARY
