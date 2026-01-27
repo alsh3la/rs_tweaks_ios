@@ -1,0 +1,266 @@
+name: Build RS Tweaks IPA
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  build-ipa:
+    name: Build iOS IPA for RS Tweaks
+    runs-on: macos-latest
+    timeout-minutes: 30  # Set timeout to prevent hanging
+
+    steps:
+      - name: 🛒 Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 📦 Setup Flutter Environment
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.22.0'
+          architecture: x64
+          cache: true  # Enable caching for faster builds
+
+      - name: 🔧 Install Dependencies
+        run: |
+          flutter clean
+          flutter pub get
+          flutter --version
+
+      - name: 📱 Ensure iOS Project Exists
+        run: |
+          if [ ! -f "ios/Runner.xcodeproj/project.pbxproj" ]; then
+            echo "Creating iOS project..."
+            flutter create --platforms=ios --org com.rstweaks --project-name rs_tweaks .
+          fi
+
+      - name: ⚙️ Configure RS Tweaks iOS Settings
+        run: |
+          # Backup original Info.plist
+          cp ios/Runner/Info.plist ios/Runner/Info.plist.backup
+          
+          # Configure ALL required permissions for RS Tweaks
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string 'RS Tweaks'" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'RS Tweaks'" ios/Runner/Info.plist
+          
+          /usr/libexec/PlistBuddy -c "Add :CFBundleName string 'RS Tweaks'" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 'RS Tweaks'" ios/Runner/Info.plist
+          
+          # Enable WebView capabilities
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :NSAppTransportSecurity:NSAllowsArbitraryLoads true" ios/Runner/Info.plist
+          
+          # File system access for downloads/uploads
+          /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :UIFileSharingEnabled true" ios/Runner/Info.plist
+          
+          /usr/libexec/PlistBuddy -c "Add :LSSupportsOpeningDocumentsInPlace bool true" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :LSSupportsOpeningDocumentsInPlace true" ios/Runner/Info.plist
+          
+          # Allow inline media playback
+          /usr/libexec/PlistBuddy -c "Add :NSAllowsArbitraryLoadsInWebContent bool true" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Set :NSAllowsArbitraryLoadsInWebContent true" ios/Runner/Info.plist
+          
+          # Set minimum iOS version
+          /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion '14.0'" ios/Runner/Info.plist
+          
+          # Enable background modes
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string 'fetch'" ios/Runner/Info.plist || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:1 string 'remote-notification'" ios/Runner/Info.plist || true
+          
+          echo "✅ iOS configuration complete"
+
+      - name: 🚫 Disable Code Signing (Critical for AltStore)
+        run: |
+          # Create a minimal xcodebuild configuration without signing
+          cat > ios/Flutter/export_options.plist << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>compileBitcode</key>
+    <false/>
+    <key>method</key>
+    <string>development</string>
+    <key>provisioningProfiles</key>
+    <dict/>
+    <key>signingCertificate</key>
+    <string></string>
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>stripSwiftSymbols</key>
+    <true/>
+    <key>teamID</key>
+    <string></string>
+    <key>thinning</key>
+    <string>&lt;none&gt;</string>
+</dict>
+</plist>
+EOF
+          
+          # Remove any existing signing configurations
+          sed -i '' 's/DEVELOPMENT_TEAM = .*;/DEVELOPMENT_TEAM = "";/g' ios/Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/PRODUCT_BUNDLE_IDENTIFIER = .*;/PRODUCT_BUNDLE_IDENTIFIER = "com.rstweaks.app";/g' ios/Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_STYLE = .*;/CODE_SIGN_STYLE = Manual;/g' ios/Runner.xcodeproj/project.pbxproj
+          sed -i '' 's/CODE_SIGN_IDENTITY = .*;//g' ios/Runner.xcodeproj/project.pbxproj
+          
+          echo "✅ Code signing disabled"
+
+      - name: 🏗️ Build iOS App (No Codesign)
+        run: |
+          # Build without any signing
+          flutter build ios \
+            --release \
+            --no-codesign \
+            --dart-define=APP_NAME="RS Tweaks" \
+            --dart-define=APP_VERSION=1.0.0 \
+            --dart-define=TARGET_URL="https://i.alsh3la991.workers.dev/"
+          
+          # Verify the app was built
+          if [ -d "build/ios/iphoneos/Runner.app" ]; then
+            echo "✅ App bundle created successfully"
+            APP_SIZE=$(du -hs build/ios/iphoneos/Runner.app | cut -f1)
+            echo "📱 App size: $APP_SIZE"
+          else
+            echo "❌ App bundle not found in build/ios/iphoneos/"
+            ls -la build/ios/
+            exit 1
+          fi
+
+      - name: 📦 Create IPA File for AltStore
+        run: |
+          # Create IPA structure
+          mkdir -p Payload
+          echo "📦 Copying app bundle to Payload..."
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          
+          # Remove unnecessary files to reduce IPA size
+          find Payload -name "*.swiftdoc" -delete
+          find Payload -name "*.swiftmodule" -delete
+          find Payload -name "*.dSYM" -delete
+          
+          # Create minimal Info.plist for IPA
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'RS Tweaks'" Payload/Runner.app/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName 'RS Tweaks'" Payload/Runner.app/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier 'com.rstweaks.app'" Payload/Runner.app/Info.plist
+          
+          # Create the IPA file
+          echo "🗜️ Creating IPA file..."
+          zip -qr9 "RS_Tweaks.ipa" Payload
+          
+          # Verify IPA was created
+          IPA_SIZE=$(du -h "RS_Tweaks.ipa" | cut -f1)
+          echo "✅ IPA created: RS_Tweaks.ipa ($IPA_SIZE)"
+
+      - name: 📝 Generate Installation Guide
+        run: |
+          cat > INSTALL_RS_TWEAKS.md << 'EOF'
+# 📱 RS Tweaks iOS Installation Guide
+
+## App Information
+- **Name**: RS Tweaks
+- **Version**: 1.0.0
+- **Target URL**: https://i.alsh3la991.workers.dev/
+- **Features**: Native iOS wrapper for RS Tweaks dashboard
+
+## Installation Methods
+
+### Method 1: AltStore (Recommended)
+1. **Install AltStore** on your computer from [altstore.io](https://altstore.io)
+2. **Install AltStore** on your iOS device via AltServer
+3. **Download** the `RS_Tweaks.ipa` file from GitHub Actions artifacts
+4. **Transfer** the IPA to your iOS device (AirDrop, iCloud, etc.)
+5. **Open** the IPA file in AltStore
+6. **Tap Install** and wait for completion
+7. **Trust** the app in Settings > General > Device Management
+
+### Method 2: TrollStore (Untethered - iOS 14-15)
+1. **Install TrollStore** on your jailbroken device
+2. **Download** the `RS_Tweaks.ipa` file
+3. **Open** in TrollStore and install
+4. **No need to refresh** - permanent installation
+
+### Method 3: Sideloadly (Alternative)
+1. **Download Sideloadly** from [sideloadly.io](https://sideloadly.io)
+2. **Connect** your iOS device to computer
+3. **Drag & drop** the IPA file into Sideloadly
+4. **Enter** your Apple ID (app-specific password recommended)
+5. **Install** and trust as above
+
+## App Features
+- Native iOS interface with tab navigation
+- WebView wrapper for RS Tweaks dashboard
+- Pull-to-refresh functionality
+- Offline detection
+- Share capabilities
+- File system access for downloads
+
+## Troubleshooting
+1. **"Untrusted Developer"**: Go to Settings > General > Device Management and trust the certificate
+2. **App won't open**: Reinstall via AltStore/Sideloadly
+3. **Web page not loading**: Check internet connection and try pull-to-refresh
+4. **App expires in 7 days**: Refresh in AltStore before expiration
+
+## Support
+For issues with the app, check the GitHub repository for updates.
+EOF
+          
+          echo "✅ Installation guide created"
+
+      - name: 📤 Upload IPA & Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: RS-Tweaks-IPA
+          path: |
+            RS_Tweaks.ipa
+            INSTALL_RS_TWEAKS.md
+          retention-days: 90  # Keep artifacts for 90 days
+          if-no-files-found: error
+
+      - name: 📊 Create Build Summary
+        run: |
+          IPA_SIZE=$(du -h "RS_Tweaks.ipa" | cut -f1)
+          
+          echo "## 🎉 RS Tweaks IPA Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 App Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **App Name**: RS Tweaks" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: 1.0.0" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target URL**: https://i.alsh3la991.workers.dev/" >> $GITHUB_STEP_SUMMARY
+          echo "- **IPA Size**: $IPA_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "- **iOS Minimum**: 14.0+" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Generated Files" >> $GITHUB_STEP_SUMMARY
+          echo "1. **RS_Tweaks.ipa** - Main IPA file for installation" >> $GITHUB_STEP_SUMMARY
+          echo "2. **INSTALL_RS_TWEAKS.md** - Complete installation guide" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⬇️ How to Download" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to Actions tab → Latest workflow run" >> $GITHUB_STEP_SUMMARY
+          echo "2. Scroll to Artifacts section" >> $GITHUB_STEP_SUMMARY
+          echo "3. Download `RS-Tweaks-IPA`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📲 Installation Methods" >> $GITHUB_STEP_SUMMARY
+          echo "| Method | Requirements | Expiration |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------------|------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **AltStore** | iOS 12+, Computer | 7 days |" >> $GITHUB_STEP_SUMMARY
+          echo "| **TrollStore** | iOS 14-15, Jailbreak | Permanent |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Sideloadly** | iOS 9+, Apple ID | 7 days |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ Important Notes" >> $GITHUB_STEP_SUMMARY
+          echo "- This IPA is **unsigned** and requires sideloading" >> $GITHUB_STEP_SUMMARY
+          echo "- For AltStore, refresh before 7-day expiration" >> $GITHUB_STEP_SUMMARY
+          echo "- Enable **Untrusted Sources** in iOS Settings" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Build Time**: $(date)" >> $GITHUB_STEP_SUMMARY
+
+      - name: 🧹 Cleanup Temporary Files
+        if: always()  # Run even if previous steps fail
+        run: |
+          rm -rf Payload build ios/build 2>/dev/null || true
+          echo "✅ Cleanup completed"
